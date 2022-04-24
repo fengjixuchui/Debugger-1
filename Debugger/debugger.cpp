@@ -1,9 +1,25 @@
-#include "main.h"
+#include <main.h>
 
-void dump_to_console(const char* string_before_line, unsigned char* buffer, unsigned long long buffer_length, unsigned long max_length, unsigned long line_width = 16)
+DWORD WINAPI debugger_wait_routine(LPVOID lpThreadParameter)
 {
-	printf("%ssize: %llu\n", string_before_line, buffer_length);
-	printf("%soffset(h) ", string_before_line);
+	c_debugger* debugger = static_cast<c_debugger*>(lpThreadParameter);
+
+	while (true)
+	{
+		if ((GetAsyncKeyState(VK_NEXT) & 0x8001) == 0x8001)
+			break;
+		Sleep(1);
+	}
+
+	debugger->detach();
+
+	return 0;
+}
+
+void dump_to_console(const char* line_prefix, unsigned char* buffer, unsigned long long buffer_length, unsigned long max_length, unsigned long line_width = 16)
+{
+	printf("%ssize: %llu\n", line_prefix, buffer_length);
+	printf("%soffset(h) ", line_prefix);
 	unsigned long line_offset = 0;
 	while (line_offset < line_width)
 	{
@@ -20,7 +36,7 @@ void dump_to_console(const char* string_before_line, unsigned char* buffer, unsi
 			printf(" ");
 
 		if (buffer_offset % line_width == 0)
-			printf("\n%s%08X: ", string_before_line, buffer_offset);
+			printf("\n%s%08X: ", line_prefix, buffer_offset);
 
 		printf("%02X ", buffer[buffer_offset++]);
 	}
@@ -32,8 +48,9 @@ const e_instruction break_op = _instruction_break;
 
 void add_break_on_winmain(c_debugger*, LPMODULEINFO);
 
-c_debugger::c_debugger(c_process& process) :
-	m_process(process),
+c_debugger::c_debugger(c_process* process) :
+	m_process(*process),
+	m_process_is_attached(false),
 	m_debug_event({ 0 }),
 	m_continue_status(DBG_CONTINUE),
 	m_thread_handle(NULL),
@@ -43,37 +60,55 @@ c_debugger::c_debugger(c_process& process) :
 	ZeroMemory(&m_module_info_callbacks, sizeof(m_module_info_callbacks));
 }
 
-void c_debugger::add_breakpoint(BYTE break_on, SIZE_T call_offset, const wchar_t* name, bool print_registers, void(*callback)(c_debugger&, c_registers&))
+c_debugger::~c_debugger()
+{
+	delete& m_process;
+}
+
+void c_debugger::attach()
+{
+	DebugActiveProcess(m_process.get_process_id());
+	m_process_is_attached = true;
+
+	CreateThread(NULL, 0, debugger_wait_routine, this, NULL, NULL);
+}
+
+void c_debugger::detach()
+{
+	DebugActiveProcessStop(m_process.get_process_id());
+	m_process_is_attached = false;
+}
+
+void c_debugger::add_breakpoint(BYTE break_on, SIZE_T offset, const wchar_t* name, bool print_registers, void(*callback)(c_debugger&, c_registers&))
 {
 	if (m_breakpoints.count < m_breakpoints.get_max_count())
 	{
 		s_breakpoint& breakpoint = m_breakpoints[m_breakpoints.count++];
 
-		printf("Adding breakpoint at 0x%016zX for %ls\n", call_offset, name);
+		printf("Adding breakpoint at 0x%016zX for %ls\n", offset, name);
 
 		breakpoint.break_on = break_on;
 		breakpoint.print_registers = print_registers;
-		breakpoint.module_offset = call_offset;
+		breakpoint.module_offset = offset;
 		wcsncpy_s(breakpoint.name, name, 64);
 		breakpoint.callback = callback;
 	}
 	else
 	{
-
-		printf("Unable to add breakpoint at 0x%016zX for %ls\n", call_offset, name);
+		printf("Unable to add breakpoint at 0x%016zX for %ls\n", offset, name);
 	}
 }
 
-void c_debugger::add_module_info_callback(void(*callback)(c_debugger&, LPMODULEINFO))
+void c_debugger::add_module_info_callback(const char* callback_name, void(*callback)(c_debugger&, LPMODULEINFO))
 {
 	if (m_module_info_callbacks.count < m_module_info_callbacks.get_max_count())
 	{
-		printf("Adding `MODULEINFO` callback for 0x%p\n", callback);
+		printf("Adding `MODULEINFO` callback for %s\n", callback_name);
 		m_module_info_callbacks[m_module_info_callbacks.count++] = callback;
 	}
 	else
 	{
-		printf("Unable to add `MODULEINFO` callback for 0x%p\n", callback);
+		printf("Unable to add `MODULEINFO` callback for %s\n", callback_name);
 	}
 }
 
@@ -90,7 +125,7 @@ void c_debugger::run_debugger(bool print_debug_strings)
 
 	bool first_break_has_occurred = false;
 
-	HMODULE modules[128] = { 0 };
+	HMODULE modules[1] = { 0 };
 	MODULEINFO module_info = { 0 };
 
 	SIZE_T bytes_written = 0;
@@ -108,12 +143,11 @@ void c_debugger::run_debugger(bool print_debug_strings)
 
 	WCHAR module_name[MAX_PATH] = { 0 };
 
-	DebugActiveProcess(m_process.get_process_id());
-
-	bool process_running = true;
-	while (process_running)
+	while (m_process_is_attached)
 	{
-		memset(module_name, 0, MAX_PATH * 2);
+		memset(modules, 0, sizeof(modules));
+		memset(instructions, 0, sizeof(instructions));
+		memset(module_name, 0, sizeof(module_name));
 
 		m_continue_status = DBG_CONTINUE;
 
@@ -261,10 +295,10 @@ void c_debugger::run_debugger(bool print_debug_strings)
 							read_debuggee_memory((LPCVOID)context.Xsp, &return_address, sizeof(return_address), NULL);
 							call_address += return_address;
 
-							printf("\n%ls\n  ", (name&&* name) ? name : L"no name");
+							printf("\n%ls\n  ", (name && *name) ? name : L"no name");
 							if (call_address > (SIZE_T)module_info.lpBaseOfDll)
 							{
-								printf("thread id: %08d, call %ls+0x%08zX\n", m_debug_event.dwThreadId, m_process.get_name(), call_address - (SIZE_T)module_info.lpBaseOfDll);
+								printf("thread id: %08d, call %ls+0x%08zX\n", m_debug_event.dwThreadId, m_process.get_process_name(), call_address - (SIZE_T)module_info.lpBaseOfDll);
 							}
 
 							SIZE_T stack_data_size = 64; // context.Xbp - context.Xsp;
@@ -313,7 +347,7 @@ void c_debugger::run_debugger(bool print_debug_strings)
 		}
 		case EXIT_PROCESS_DEBUG_EVENT:
 		{
-			process_running = false;
+			m_process_is_attached = false;
 			break;
 		}
 		case OUTPUT_DEBUG_STRING_EVENT:
@@ -409,6 +443,25 @@ LPVOID c_debugger::allocate_debuggee_memory(
 	return VirtualAllocEx(m_process.get_process_handle(), lpAddress, dwSize, flAllocationType, flProtect);
 }
 
+BOOL c_debugger::protect_debuggee_memory(
+	_In_ LPVOID lpAddress,
+	_In_ SIZE_T dwSize,
+	_In_ DWORD flNewProtect,
+	_Out_ PDWORD lpflOldProtect
+)
+{
+	return VirtualProtectEx(m_process.get_process_handle(), lpAddress, dwSize, flNewProtect, lpflOldProtect);
+}
+
+SIZE_T c_debugger::query_debuggee_memory(
+	_In_opt_ LPCVOID lpAddress,
+	_Out_writes_bytes_to_(dwLength, return) PMEMORY_BASIC_INFORMATION lpBuffer,
+	_In_ SIZE_T dwLength
+)
+{
+	return VirtualQueryEx(m_process.get_process_handle(), lpAddress, lpBuffer, dwLength);
+}
+
 BOOL c_debugger::read_debuggee_memory(
 	_In_ LPCVOID lpBaseAddress,
 	_Out_writes_bytes_to_(nSize, *lpNumberOfBytesRead) LPVOID lpBuffer,
@@ -462,4 +515,67 @@ LPVOID c_debugger::allocate_and_write_debuggee_memory(
 	write_debuggee_memory(lpAddress, lpBuffer, nSize, lpNumberOfBytesWritten);
 
 	return lpAddress;
+}
+
+BOOL c_debugger::dump_debuggee_memory(
+	_In_ LPVOID lpAddress,
+	_In_ SIZE_T dwSize,
+	_In_ LPCWSTR lpFileName
+)
+{
+	if (!lpAddress || !dwSize || !(*lpFileName))
+		return FALSE;
+
+	FILE* file;
+	_wfopen_s(&file, lpFileName, L"w");
+	if (file == NULL || file == INVALID_HANDLE_VALUE)
+		return FALSE;
+
+	unsigned char* memory = new unsigned char[dwSize];
+	read_debuggee_memory(lpAddress, memory, dwSize, NULL);
+	fwrite(memory, sizeof(unsigned char), dwSize, file);
+
+	fflush(file);
+	fclose(file);
+
+	delete[] memory;
+
+	return TRUE;
+}
+
+void debugger_unprotect_module(c_debugger& debugger, LPCWSTR module_name)
+{
+	c_process& process = debugger.get_process();
+	HANDLE process_handle = process.get_process_handle();
+
+	HMODULE* modules = nullptr;
+	DWORD module_count = process_get_modules(process, &modules);
+	assert(modules != nullptr);
+
+	DWORD module_index = process_get_module_index(process, modules, module_count, module_name);
+
+	MODULEINFO module_info = { 0 };
+	GetModuleInformation(process_handle, modules[module_index], &module_info, sizeof(module_info));
+
+	delete[] modules;
+
+	// which of these is better?
+	if (false)
+	{
+		// is this better?
+		DWORD protect;
+		debugger.protect_debuggee_memory(module_info.lpBaseOfDll, module_info.SizeOfImage, PAGE_EXECUTE_READWRITE, &protect);
+	}
+	else
+	{
+		// or is this better?
+		MEMORY_BASIC_INFORMATION memory_info = { 0 };
+		for (SIZE_T module_offset = 0; module_offset < debugger.query_debuggee_memory(reinterpret_cast<LPCVOID>(reinterpret_cast<SIZE_T>(module_info.lpBaseOfDll) + module_offset), &memory_info, sizeof(MEMORY_BASIC_INFORMATION)); module_offset += memory_info.RegionSize)
+		{
+			if (memory_info.Protect != PAGE_EXECUTE_READ)
+				continue;
+
+			debugger.protect_debuggee_memory(memory_info.BaseAddress, memory_info.RegionSize, PAGE_EXECUTE_READWRITE, &memory_info.Protect);
+		}
+	}
 }

@@ -4,9 +4,10 @@ class c_process
 {
 public:
 	c_process();
+	~c_process();
 
-	bool create(const wchar_t* format, ...);
-	bool open(const wchar_t* process_name);
+	bool create();
+	bool open();
 	void close();
 
 	void suspend_thread();
@@ -28,16 +29,19 @@ public:
 	const wchar_t* get_current_directory();
 	void set_current_directory(const wchar_t* current_directory);
 
-	const wchar_t* get_name();
-	void set_name(const wchar_t* process_name);
+	const wchar_t* get_process_name();
+	void set_process_name(const wchar_t* process_name);
 
 protected:
-	wchar_t m_current_directory[MAX_PATH];
-	wchar_t m_process_name[MAX_PATH];
-	wchar_t m_command_line[1024];
+	wchar_t* m_command_line;
+	wchar_t* m_process_name;
+	wchar_t* m_current_directory;
 
 	STARTUPINFO m_startup_info;
 	PROCESS_INFORMATION m_process_info;
 
 	bool m_suspended;
 };
+
+DWORD process_get_modules(c_process& process, HMODULE** out_modules);
+DWORD process_get_module_index(c_process& process, HMODULE* modules, DWORD module_count, LPCWSTR module_name);

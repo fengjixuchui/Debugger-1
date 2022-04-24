@@ -55,21 +55,36 @@ struct s_breakpoint
 class c_debugger
 {
 public:
-	c_debugger(c_process& process);
+	c_debugger(c_process* process);
+	~c_debugger();
 
-	void run_debugger(bool print_debug_strings = true);
+	void attach();
+	void detach();
 
 	void add_breakpoint(BYTE, SIZE_T, const wchar_t*, bool, void(*callback)(c_debugger&, class c_registers&) = nullptr);
 
-	void add_module_info_callback(void(*callback)(c_debugger&, LPMODULEINFO));
+	void add_module_info_callback(const char*, void(*callback)(c_debugger&, LPMODULEINFO));
 
 	c_process& get_process();
+
+	void run_debugger(bool print_debug_strings = true);
 
 	LPVOID allocate_debuggee_memory(
 		_In_opt_ LPVOID lpAddress,
 		_In_ SIZE_T dwSize,
 		_In_ DWORD flAllocationType,
 		_In_ DWORD flProtect
+	);
+	BOOL protect_debuggee_memory(
+		_In_ LPVOID lpAddress,
+		_In_ SIZE_T dwSize,
+		_In_ DWORD flNewProtect,
+		_Out_ PDWORD lpflOldProtect
+	);
+	SIZE_T query_debuggee_memory(
+		_In_opt_ LPCVOID lpAddress,
+		_Out_writes_bytes_to_(dwLength, return) PMEMORY_BASIC_INFORMATION lpBuffer,
+		_In_ SIZE_T dwLength
 	);
 	BOOL read_debuggee_memory(
 		_In_ LPCVOID lpBaseAddress,
@@ -101,9 +116,15 @@ public:
 		_In_ DWORD flProtect,
 		_Out_opt_ SIZE_T* lpNumberOfBytesWritten
 	);
+	BOOL dump_debuggee_memory(
+		_In_ LPVOID lpAddress,
+		_In_ SIZE_T dwSize,
+		_In_ LPCWSTR lpFileName
+	);
 
 protected:
 	c_process& m_process;
+	bool m_process_is_attached;
 
 	DEBUG_EVENT m_debug_event;
 	DWORD m_continue_status;
@@ -134,6 +155,19 @@ BOOL debugger_write_debuggee_string(
 	long string_size_in_bytes = k_string_size * sizeof(t_string_type);
 	return debugger.write_debuggee_memory(lpAddress, string, string_size_in_bytes, NULL);
 }
+
+template<typename t_address_type, typename t_data_type, size_t k_count, size_t k_data_size = k_count * sizeof(t_data_type)>
+void debugger_write_data(
+	c_debugger& debugger,
+	t_address_type address,
+	t_data_type(&buffer)[k_count]
+)
+{
+	debugger.write_debuggee_memory(*reinterpret_cast<LPVOID*>(&address), buffer, k_data_size, NULL);
+}
+#define debugger_write_array(in_debugger, in_address, array_type, ...) { array_type in_array[] = __VA_ARGS__; debugger_write_data((in_debugger), (in_address), in_array); }
+
+void debugger_unprotect_module(c_debugger& debugger, LPCWSTR module_name);
 
 class c_registers
 {
