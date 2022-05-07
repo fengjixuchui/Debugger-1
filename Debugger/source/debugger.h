@@ -24,12 +24,10 @@
 #define Xsp Esp
 #endif // WIN64
 
-enum e_instruction : BYTE
-{
-	_instruction_call = 0xE8,
-	_instruction_break = 0xCC
-};
+static const BYTE k_call_instruction = 0xE8;
+static const BYTE k_break_instruction = 0xCC;
 
+TODO("find a home for this")
 template<typename t_type, SIZE_T k_max_count>
 struct s_static_array
 {
@@ -45,10 +43,11 @@ class c_debugger;
 class c_registers;
 struct s_breakpoint
 {
+	const char* opcode_name;
 	BYTE break_on;
 	bool print_registers;
 	SIZE_T module_offset;
-	WCHAR name[64];
+	WCHAR name[128];
 	void(*callback)(class c_debugger&, class c_registers&);
 };
 
@@ -61,7 +60,7 @@ public:
 	void attach();
 	void detach();
 
-	void add_breakpoint(BYTE, SIZE_T, const wchar_t*, bool, void(*callback)(c_debugger&, class c_registers&) = nullptr);
+	void add_breakpoint(SIZE_T, bool, const char*, const wchar_t*, void(*callback)(c_debugger&, class c_registers&) = nullptr);
 
 	void add_module_info_callback(const char*, void(*callback)(c_debugger&, LPMODULEINFO));
 
@@ -138,7 +137,7 @@ protected:
 template<typename t_string_type, size_t k_string_size>
 LPVOID debugger_allocate_and_write_debuggee_string(
 	c_debugger& debugger,
-	t_string_type(&string)[k_string_size]
+	const t_string_type(&string)[k_string_size]
 )
 {
 	long string_size_in_bytes = k_string_size * sizeof(t_string_type);
@@ -149,26 +148,26 @@ template<typename t_string_type, size_t k_string_size>
 BOOL debugger_write_debuggee_string(
 	c_debugger& debugger,
 	LPVOID lpAddress,
-	t_string_type(&string)[k_string_size]
+	const t_string_type(&string)[k_string_size]
 )
 {
 	long string_size_in_bytes = k_string_size * sizeof(t_string_type);
 	return debugger.write_debuggee_memory(lpAddress, string, string_size_in_bytes, NULL);
 }
 
-template<typename t_address_type, typename t_data_type, size_t k_count, size_t k_data_size = k_count * sizeof(t_data_type)>
+template<typename t_address_type, typename t_data_type, size_t k_length, size_t k_data_size = k_length * sizeof(t_data_type)>
 void debugger_write_data(
 	c_debugger& debugger,
 	t_address_type address,
-	t_data_type(&buffer)[k_count]
+	const t_data_type(&buffer)[k_length]
 )
 {
 	debugger.write_debuggee_memory(*reinterpret_cast<LPVOID*>(&address), buffer, k_data_size, NULL);
 }
-#define debugger_write_array(in_debugger, in_address, array_type, ...) { array_type in_array[] = __VA_ARGS__; debugger_write_data((in_debugger), (in_address), in_array); }
 
 void debugger_unprotect_module(c_debugger& debugger, LPCWSTR module_name);
 
+TODO("find a home for this")
 class c_registers
 {
 public:
@@ -177,9 +176,9 @@ public:
 		context(context),
 
 #ifdef _WIN64
-		static_base_addr(PE64BASE),
+		static_base_addr(PE64_BASE),
 #else
-		static_base_addr(PE32BASE),
+		static_base_addr(PE32_BASE),
 #endif // WIN64
 		runtime_base_addr(reinterpret_cast<SIZE_T>(module_info->lpBaseOfDll))
 	{
@@ -303,10 +302,15 @@ public:
 		return context.Xbp - context.Xsp;
 	}
 
+	SIZE_T get_runtime_addr(SIZE_T offset = 0)
+	{
+		return runtime_base_addr + offset;
+	}
+
 	template<typename t_type>
 	t_type* get_runtime_addr_as(SIZE_T offset = 0)
 	{
-		return reinterpret_cast<t_type*>(runtime_base_addr + offset);
+		return reinterpret_cast<t_type*>(get_runtime_addr(offset));
 	}
 
 	CONTEXT& get_raw_context()
@@ -320,4 +324,162 @@ protected:
 	CONTEXT& context;
 	SIZE_T static_base_addr;
 	SIZE_T runtime_base_addr;
+};
+
+TODO("find a home for this")
+template<typename t_type>
+class c_remote_reference
+{
+public:
+	c_remote_reference(c_debugger& debugger) :
+		m_debugger(debugger),
+		m_address(0),
+		m_value()
+	{
+	}
+	c_remote_reference(c_debugger& debugger, size_t address) :
+		m_debugger(debugger),
+		m_address(address),
+		m_value()
+	{
+		if (m_address == 0)
+			throw;
+
+		read_remote();
+	}
+
+	void set_address(size_t address)
+	{
+		if (address != 0)
+			m_address = address;
+
+		if (m_address == 0)
+			throw;
+
+		read_remote();
+	}
+
+	size_t get_address()
+	{
+		return m_address;
+	}
+
+	void operator=(t_type value)
+	{
+		if (m_address == 0)
+			return;
+
+		memcpy(&m_value, &value, sizeof(t_type));
+
+		write_remote();
+	}
+	bool operator==(t_type value)
+	{
+		if (m_address == 0)
+			return false;
+
+		read_remote();
+		return m_value == value;
+	}
+	bool operator!=(t_type value)
+	{
+		return !(*this == value);
+	}
+	t_type& operator()()
+	{
+		return m_value;
+	}
+
+private:
+	c_debugger& m_debugger;
+	size_t m_address;
+	t_type m_value;
+
+	void read_remote()
+	{
+		m_debugger.read_debuggee_memory(reinterpret_cast<LPCVOID>(m_address), &m_value, sizeof(t_type), NULL);
+	}
+
+	void write_remote()
+	{
+		m_debugger.write_debuggee_memory(reinterpret_cast<LPVOID>(m_address), &m_value, sizeof(t_type), NULL);
+	}
+};
+
+TODO("find a home for this")
+template<typename t_type>
+class c_remote_pointer
+{
+public:
+	c_remote_pointer(c_debugger& debugger) :
+		m_debugger(debugger),
+		m_address(m_debugger),
+		m_value((t_type*)VirtualAlloc(0, sizeof(t_type), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))
+	{
+	}
+	c_remote_pointer(c_debugger& debugger, size_t address) :
+		m_debugger(debugger),
+		m_address(m_debugger, address),
+		m_value((t_type*)VirtualAlloc(0, sizeof(t_type), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))
+	{
+		read_remote();
+	}
+
+	~c_remote_pointer()
+	{
+		if (m_value)
+			VirtualFree(m_value, sizeof(t_type), MEM_RELEASE);
+	}
+
+	void set_address(size_t address)
+	{
+		m_address.set_address(address);
+		read_remote();
+	}
+
+	size_t get_address()
+	{
+		return m_address();
+	}
+
+	void operator=(t_type value)
+	{
+		if (m_address == 0)
+			return;
+
+		memcpy(m_value, value, sizeof(t_type));
+
+		write_remote();
+	}
+	bool operator==(t_type value)
+	{
+		if (m_address == 0)
+			return false;
+
+		read_remote();
+		return memcmp(m_value, value, sizeof(t_type)) == 0;
+	}
+	bool operator!=(t_type value)
+	{
+		return !(*this == value);
+	}
+	t_type& operator()()
+	{
+		return *m_value;
+	}
+
+private:
+	c_debugger& m_debugger;
+	c_remote_reference<size_t> m_address;
+	t_type* m_value;
+
+	void read_remote()
+	{
+		m_debugger.read_debuggee_memory(reinterpret_cast<LPCVOID>(m_address()), m_value, sizeof(t_type), NULL);
+	}
+
+	void write_remote()
+	{
+		m_debugger.read_debuggee_memory(reinterpret_cast<LPVOID>(m_address()), m_value, NULL);
+	}
 };
